@@ -1,36 +1,50 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI-анализ встреч
 
-## Getting Started
+Независимое приложение на Next.js для загрузки MP4/WebM вручную или по публичной ссылке Яндекс Диска. Оба пути используют одну функцию `processMeeting`: видео всегда преобразуется локальным `ffmpeg-static` в моно-аудио 16 кГц, затем Groq выполняет транскрибацию, а Google Gemini — структурированный анализ.
 
-First, run the development server:
+## Возможности
+
+- Статусы без фиктивных процентов: «Получение файла», «Распознавание речи», «AI-анализ», «Готово», «Ошибка».
+- Фоновая обработка через Next.js `after()` с `maxDuration = 300`.
+- Определение зависшей обработки при чтении списка или карточки и безопасный повтор из интерфейса.
+- Предварительная дедупликация ссылок по нормализованному URL, `resource_id`, размеру, дате изменения и контрольным суммам Яндекс Диска (когда API их возвращает).
+- Окончательная дедупликация всех источников по SHA-256 содержимого.
+- Уникальные частичные индексы PostgreSQL и `INSERT ... ON CONFLICT`, защищающие от параллельного создания одинаковых анализов.
+- Версии изменившегося файла связаны через `previous_meeting_id`.
+- Исходник в приватном Vercel Blob удаляется только после успешного статуса «Готово». При ошибке он сохраняется для повтора.
+
+## Настройка
+
+1. Установите Node.js 22+ и PostgreSQL 15+ (`@google/genai` 3.x требует Node.js 22 или новее).
+2. Скопируйте `.env.example` в `.env.local` и задайте `POSTGRES_URL`, `GROQ_API_KEY`, `GEMINI_API_KEY` и `BLOB_READ_WRITE_TOKEN`.
+3. Создайте таблицы: `npm run db:init`.
+4. Запустите приложение: `npm run dev`.
+5. Откройте `http://localhost:3000`.
+
+Локальный запуск всё равно требует Vercel Blob, потому что ручная загрузка идёт напрямую из браузера, не проходя через лимит тела запроса функции. Яндекс Диск должен предоставлять публичную ссылку на отдельный MP4/WebM-файл.
+
+## Лимиты обработки
+
+- По умолчанию исходное видео ограничено 1 ГБ, а суммарный бюджет временного каталога — 1,25 ГБ. Настройки находятся в `.env.example`.
+- Аудио сначала кодируется в MP3 48 кбит/с. Если результат превышает 25 000 000 байт, создаётся Opus 24 кбит/с.
+- `MAX_TRANSCRIPTION_BYTES` принудительно ограничен 25 000 000 байт, даже если в окружении указано больше: это исключает отправку файла сверх лимита бесплатного тарифа Groq.
+- Если и Opus превышает лимит Groq, запись получает понятный статус ошибки и файл не отправляется провайдеру.
+- `maxDuration` должен оставаться статическим литералом для Next.js. Сейчас он равен 300 секундам во всех маршрутах; при изменении синхронно обновите `MAX_DURATION_SECONDS` в `src/lib/config.ts`.
+- Groq и Gemini используют общий дедлайн обработки. По умолчанию каждый запрос ограничен 60 секундами, допускается не более двух попыток, а последние 10 секунд зарезервированы для сохранения ошибки и очистки временных файлов.
+- Повторяются только сетевые ошибки, HTTP 408, 429 и 5xx. Ошибки авторизации и невалидные ответы моделей не повторяются.
+- Реальный доступный `/tmp` и максимальная длительность функции зависят от выбранной платформы и тарифа.
+
+## Проверки
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run typecheck
+npm run lint
+npm test
+npm run build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Для интеграционной приёмки нужны отдельные тестовые PostgreSQL, Blob, Groq- и Gemini-ключи. Проверьте четыре обязательных сценария: видео больше 25 МБ; искусственно устаревший `updated_at` и повтор; два параллельных запроса одной ссылки; изменённый файл по прежней ссылке и ручной дубликат по SHA-256.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Схема данных
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+DDL находится в `db/schema.sql`, а идемпотентное применение — в `scripts/init-db.mjs`. Автоматическое удаление готовых результатов и записей БД не настроено.
